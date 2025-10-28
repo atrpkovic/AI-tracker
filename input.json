@@ -1,9 +1,0 @@
-{
-  "brand_name": "Fullway",
-  "prompts": [
-    "What are the best budget-friendly tire brands?",
-    "Are Fullway tires any good?",
-    "What is the best car in the world?"
-  ],
-  "models": ["groq", "gemini"]
-}

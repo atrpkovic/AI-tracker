@@ -1,85 +1,156 @@
-# playwright_aio_cdp.py
-# Uses your real Chrome profile — no automation banner, no sandbox fingerprint.
-
-import asyncio
-import json
+import streamlit as st
+import pandas as pd
 import os
-import random
+from tracker_logic import process_keyword, check_serpapi_account, BRANDS_FILE
 import time
-from datetime import datetime
-from urllib.parse import quote_plus
-from playwright.async_api import async_playwright
 
-# Path to your installed Chrome executable
-CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-# Path to your real Chrome profile (Profile 1 or Default)
-USER_DATA_DIR = r"C:\Users\MDC21\AppData\Local\Google\Chrome\User Data"
-SNAPSHOT_DIR = "snapshots"
-os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="AI Overview Brand Tracker",
+    page_icon="🤖",
+    layout="wide"
+)
 
-KEYWORD = "what ply is load range e"
-WAIT_MIN, WAIT_MAX = 5, 10
+# --- Main UI ---
+st.title("🤖 AI Overview Brand Tracker")
+st.markdown("This tool scans Google's AI Overviews for brand mentions based on a list of keywords.")
 
+# --- Sidebar for Inputs ---
+with st.sidebar:
+    st.header("Configuration")
+    
+    # API Key Input
+    api_key = st.text_input(
+        "Enter your SerpApi API Key", 
+        type="password",
+        help="Get your key from serpapi.com. We don't store your key."
+    )
+    
+    # Keywords Input
+    default_keywords = "best running shoes\nbest coffee maker\nwhat is generative ai"
+    keywords_input = st.text_area(
+        "Enter keywords (one per line)", 
+        default_keywords,
+        height=250
+    )
+    
+    # Run Button
+    run_button = st.button("Run Tracker", type="primary", use_container_width=True)
 
-def _stamp():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+# --- Main Content Area for Results ---
+if run_button:
+    if not api_key:
+        st.error("Please enter your SerpApi API Key in the sidebar to begin.")
+        st.stop()
+        
+    if not keywords_input:
+        st.error("Please enter at least one keyword in the sidebar.")
+        st.stop()
+        
+    # Check for brands.json
+    if not os.path.exists(BRANDS_FILE):
+        st.error(f"Error: '{BRANDS_FILE}' not found.")
+        st.markdown(f"Please create or upload a `{BRANDS_FILE}` file to your app's repository. It should look like this:")
+        st.code("""
+{
+    "nike.com": ["nike", "air jordan"],
+    "adidas.com": ["adidas", "adipure"],
+    "example.com": ["example brand"]
+}
+        """, language="json")
+        st.stop()
 
+    # Process keywords
+    keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()]
+    total_keywords = len(keywords)
+    
+    st.info(f"Processing {total_keywords} keywords... This may take a moment.")
 
-async def main():
-    print("🚀 Starting Chrome via CDP (no automation banner)...")
-
-    # 1️⃣ Start your actual Chrome manually
-    # (Playwright will attach to it via remote debugging)
-    os.system(f'"{CHROME_PATH}" --remote-debugging-port=9222 --user-data-dir="{USER_DATA_DIR}"')
-
-    print("🕓 Waiting a few seconds for Chrome to start...")
-    await asyncio.sleep(5)
-
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp("http://localhost:9222")
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        q = quote_plus(KEYWORD)
-        url = f"https://www.google.com/search?q={q}&hl=en"
-        print(f"🔍 Navigating to {url}")
-        await page.goto(url, wait_until="domcontentloaded")
-
-        # Simulate human delay + scroll
-        await asyncio.sleep(random.uniform(WAIT_MIN, WAIT_MAX))
-        for _ in range(random.randint(1, 3)):
-            await page.mouse.wheel(0, random.randint(400, 900))
-            await asyncio.sleep(random.uniform(0.8, 1.5))
-
-        html = await page.content()
-        if "Our systems have detected unusual traffic" in html:
-            print("⚠️ CAPTCHA triggered even in CDP mode. Solve manually in the Chrome window, then press Enter.")
-            input("✅ Press Enter here after solving manually...")
-
-        # Try to locate AI Overview section
-        aio_locator = page.locator("div:has-text('AI Overview')")
-        if await aio_locator.count() > 0:
-            text_blocks = await aio_locator.locator("p, li").all_inner_texts()
-            links = [
-                href
-                for href in await aio_locator.locator("a").evaluate_all(
-                    "els => els.map(a => a.href).filter(h => h && h.startsWith('http'))"
-                )
-            ]
-            aio_data = {"keyword": KEYWORD, "text": " ".join(text_blocks), "links": links}
-            out = os.path.join(SNAPSHOT_DIR, f"aio_cdp_result_{_stamp()}.json")
-            with open(out, "w", encoding="utf-8") as f:
-                json.dump(aio_data, f, indent=2)
-            print(f"✅ Found AI Overview, saved to {out}")
+    # Check SerpApi Account
+    with st.spinner("Checking SerpApi account..."):
+        account_info = check_serpapi_account(api_key)
+        if account_info:
+            searches_left = account_info.get('searches_left', 'N/A')
+            st.success(f"SerpApi account check OK. Searches left: {searches_left}")
         else:
-            out = os.path.join(SNAPSHOT_DIR, f"aio_cdp_snapshot_{_stamp()}.html")
-            with open(out, "w", encoding="utf-8") as f:
-                f.write(html)
-            print(f"⚠️ No AI Overview detected, saved HTML snapshot: {out}")
+            st.warning("Could not verify SerpApi account, but will proceed. Check your API key if errors occur.")
 
-        await browser.close()
-        print("✅ Done.")
+    # Placeholders for results
+    progress_bar = st.progress(0)
+    summary_placeholder = st.empty()
+    
+    all_brand_hits = []
+    summary_log = []
+    
+    start_time = time.time()
 
+    for i, keyword in enumerate(keywords, 1):
+        status_text = f"Processing: '{keyword}' ({i}/{total_keywords})"
+        # This is a small update to make the log cleaner in Streamlit
+        log_message_placeholder = st.empty()
+        log_message_placeholder.text(status_text)
+        
+        try:
+            # Call the function from tracker_logic.py
+            rows, status = process_keyword(keyword, BRANDS_FILE, api_key)
+            
+            # Update summary log
+            if status == "SUCCESS":
+                if rows:
+                    log_entry = f"✅ Found {len(rows)} brand(s) for: '{keyword}'"
+                    all_brand_hits.extend(rows)
+                else:
+                    log_entry = f"ℹ️ AIO found, but no matching brands for: '{keyword}'"
+            elif status == "NO_AIO":
+                log_entry = f"⚠️ No AI Overview found for: '{keyword}'"
+            elif status == "INVALID_AIO":
+                log_entry = f"❌ Invalid AIO structure for: '{keyword}'"
+            else: # API_ERROR
+                log_entry = f"❌ API Error processing: '{keyword}'"
+            
+            summary_log.append(log_entry)
+            log_message_placeholder.empty() # Clear the "Processing..." line
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        except Exception as e:
+            st.error(f"An unexpected error occurred processing '{keyword}': {e}")
+            summary_log.append(f"🔥 UNEXPECTED ERROR for: '{keyword}'")
+            log_message_placeholder.empty() # Clear the "Processing..." line
+
+        # Update UI
+        progress_bar.progress(i / total_keywords)
+        # Display log in reverse so newest is at top
+        summary_placeholder.markdown("### Processing Log\n" + "\n".join(f"- {s}" for s in reversed(summary_log)))
+
+    end_time = time.time()
+    st.success(f"Processing complete in {end_time - start_time:.2f} seconds!")
+
+    # --- Display Final Results ---
+    if all_brand_hits:
+        st.subheader("Brand Mentions Found")
+        
+        # Create DataFrame
+        try:
+            df = pd.DataFrame(
+                all_brand_hits, 
+                columns=["Timestamp", "Keyword", "Brand", "Matched Term", "Context", "URL", "Source"]
+            )
+            
+            # Display the DataFrame
+            st.dataframe(df)
+            
+            # Download Button
+            csv_data = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Results as CSV",
+                data=csv_data,
+                file_name="ai_overview_brand_hits.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        except Exception as e:
+            st.error(f"Error creating DataFrame: {e}")
+            st.json(all_brand_hits) # Fallback to JSON
+            
+    else:
+        st.info("No brand mentions were found in the AI Overviews for the given keywords.")
+
