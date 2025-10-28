@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
-from tracker_logic import process_keyword, check_serpapi_account, BRANDS_FILE
+from ai_brand_tracker import process_keyword, check_serpapi_account, BRANDS_FILE
 import time
 
 # --- Page Configuration ---
