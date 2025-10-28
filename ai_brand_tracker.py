@@ -277,11 +277,6 @@ def check_serpapi_account():
 def main():
     logger.info("🚀 Starting AI Overview Brand Tracker\n")
     
-    # Check API key
-    if SERPAPI_KEY == "YOUR_API_KEY_HERE":
-        logger.error("❌ Please set your SERPAPI_KEY in the config section")
-        return
-    
     # Check account
     logger.info("Checking SerpApi account...")
     account = check_serpapi_account()
