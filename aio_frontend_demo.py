@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import os
-from ai_brand_tracker import process_keyword, check_serpapi_account, BRANDS_FILE
+# Import SERPAPI_KEY directly from the backend logic file
+from tracker_logic import process_keyword, check_serpapi_account, BRANDS_FILE, SERPAPI_KEY
 import time
 
 # --- Page Configuration ---
@@ -15,36 +16,34 @@ st.set_page_config(
 st.title("🤖 AI Overview Brand Tracker")
 st.markdown("This tool scans Google's AI Overviews for brand mentions based on a list of keywords.")
 
-# --- Sidebar for Inputs ---
-with st.sidebar:
-    st.header("Configuration")
-    
-    # API Key Input
-    api_key = st.text_input(
-        "Enter your SerpApi API Key", 
-        type="password",
-        help="Get your key from serpapi.com. We don't store your key."
-    )
-    
-    # Keywords Input
-    default_keywords = "best running shoes\nbest coffee maker\nwhat is generative ai"
-    keywords_input = st.text_area(
-        "Enter keywords (one per line)", 
-        default_keywords,
-        height=250
-    )
-    
-    # Run Button
-    run_button = st.button("Run Tracker", type="primary", use_container_width=True)
+# --- Inputs on Main Page (Moved from Sidebar) ---
+st.header("Configuration")
+
+# --- API Key input is REMOVED ---
+# The app will now use the SERPAPI_KEY from tracker_logic.py
+
+default_keywords = "best running shoes\nbest coffee maker\nwhat is generative ai"
+keywords_input = st.text_area(
+    "Enter keywords (one per line)", 
+    default_keywords,
+    height=250
+)
+
+# Run Button
+run_button = st.button("Run Tracker", type="primary")
+
 
 # --- Main Content Area for Results ---
 if run_button:
-    if not api_key:
-        st.error("Please enter your SerpApi API Key in the sidebar to begin.")
+    # --- UPDATED CHECK ---
+    # Check if the hardcoded key in the backend file is valid
+    if not SERPAPI_KEY or SERPAPI_KEY == "5d3f50d427ec0c756bc4c02d12d8d6461e4b31dd1d0190d310bc447993ceb27b": # Or whatever your placeholder is
+        st.error("Error: SERPAPI_KEY is not set in tracker_logic.py.")
+        st.markdown("Please edit the `tracker_logic.py` file and add your valid SerpApi key to the `SERPAPI_KEY` variable.")
         st.stop()
         
     if not keywords_input:
-        st.error("Please enter at least one keyword in the sidebar.")
+        st.error("Please enter at least one keyword.")
         st.stop()
         
     # Check for brands.json
@@ -68,12 +67,13 @@ if run_button:
 
     # Check SerpApi Account
     with st.spinner("Checking SerpApi account..."):
-        account_info = check_serpapi_account(api_key)
+        # --- UPDATED CALL (no api_key argument) ---
+        account_info = check_serpapi_account()
         if account_info:
             searches_left = account_info.get('searches_left', 'N/A')
             st.success(f"SerpApi account check OK. Searches left: {searches_left}")
         else:
-            st.warning("Could not verify SerpApi account, but will proceed. Check your API key if errors occur.")
+            st.warning("Could not verify SerpApi account, but will proceed. Check your API key in tracker_logic.py if errors occur.")
 
     # Placeholders for results
     progress_bar = st.progress(0)
@@ -91,8 +91,8 @@ if run_button:
         log_message_placeholder.text(status_text)
         
         try:
-            # Call the function from tracker_logic.py
-            rows, status = process_keyword(keyword, BRANDS_FILE, api_key)
+            # --- UPDATED CALL (no api_key argument) ---
+            rows, status = process_keyword(keyword, BRANDS_FILE)
             
             # Update summary log
             if status == "SUCCESS":
