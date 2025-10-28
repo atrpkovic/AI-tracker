@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import os
-# Import SERPAPI_KEY directly from the backend logic file
 from ai_brand_tracker import process_keyword, check_serpapi_account, BRANDS_FILE, SERPAPI_KEY
 import time
 
@@ -20,7 +19,7 @@ st.markdown("This tool scans Google's AI Overviews for brand mentions based on a
 st.header("Configuration")
 
 # --- API Key input is REMOVED ---
-# The app will now use the SERPAPI_KEY from tracker_logic.py
+# The app will now use the SERPAPI_KEY from ai_brand_tracker.py
 
 default_keywords = "best running shoes\nbest coffee maker\nwhat is generative ai"
 keywords_input = st.text_area(
@@ -35,11 +34,11 @@ run_button = st.button("Run Tracker", type="primary")
 
 # --- Main Content Area for Results ---
 if run_button:
-    # --- UPDATED CHECK ---
-    # Check if the hardcoded key in the backend file is valid
-    if not SERPAPI_KEY or SERPAPI_KEY == "5d3f50d427ec0c756bc4c02d12d8d6461e4b31dd1d0190d310bc447993ceb27b": # Or whatever your placeholder is
-        st.error("Error: SERPAPI_KEY is not set in tracker_logic.py.")
-        st.markdown("Please edit the `tracker_logic.py` file and add your valid SerpApi key to the `SERPAPI_KEY` variable.")
+    # --- *** FIX: Removed the check for your specific API key *** ---
+    # The app will now only check if the key is missing entirely.
+    if not SERPAPI_KEY:
+        st.error("Error: SERPAPI_KEY is not set in ai_brand_tracker.py.")
+        st.markdown("Please edit the `ai_brand_tracker.py` file and add your valid SerpApi key to the `SERPAPI_KEY` variable.")
         st.stop()
         
     if not keywords_input:
@@ -73,7 +72,8 @@ if run_button:
             searches_left = account_info.get('searches_left', 'N/A')
             st.success(f"SerpApi account check OK. Searches left: {searches_left}")
         else:
-            st.warning("Could not verify SerpApi account, but will proceed. Check your API key in tracker_logic.py if errors occur.")
+            # --- THIS IS THE TEXT I AM FIXING ---
+            st.warning("Could not verify SerpApi account, but will proceed. Check your API key in ai_brand_tracker.py if errors occur.")
 
     # Placeholders for results
     progress_bar = st.progress(0)
