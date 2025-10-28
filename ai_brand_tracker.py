@@ -1,177 +1,373 @@
 import json
 import requests
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import os
+import random
+from urllib.parse import urlparse
+from typing import Optional, List
+import logging
 
-SERPAPI_KEY = "5d3f50d427ec0c756bc4c02d12d8d6461e4b31dd1d0190d310bc447993ceb27b"
-KEYWORDS_FILE = r"C:\Users\MDC21\vsfiles\.vscode\AIO tracker\keywords.csv"
-BRANDS_FILE = r"C:\Users\MDC21\vsfiles\.vscode\AIO tracker\brands.json"
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
+# ====== CONFIG ======
+SERPAPI_KEY = "5d3f50d427ec0c756bc4c02d12d8d6461e4b31dd1d0190d310bc447993ceb27b"  # Replace with your key
+KEYWORDS_FILE = "keywords.csv"
+BRANDS_FILE = "brands.json"
 OUTPUT_FILE = "ai_overview_brand_hits_master.csv"
+SAVE_JSON = True
 
+# Rate limiting (SerpApi allows ~100 searches/hour on free tier)
+MIN_DELAY = 2
+MAX_DELAY = 5
+
+# Set to False for production
+DEBUG_MODE = False
+# ====================
+
+def _now_ts():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+def _stamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+def _safe_name(s: str, limit=40):
+    return "".join(c for c in s.replace(" ", "_")[:limit] if c.isalnum() or c in ("_", "-"))
 
 def save_json(data, label, keyword):
-    """Save the SerpApi JSON response for debugging and auditing."""
-    safe_keyword = keyword.replace(" ", "_")[:40]
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"serpapi_{label}_{safe_keyword}_{timestamp}.json"
-    with open(filename, "w", encoding="utf-8") as f:
+    if not SAVE_JSON:
+        return None
+    fname = f"serpapi_{label}_{_safe_name(keyword)}_{_stamp()}.json"
+    with open(fname, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-    print(f"✅ Saved {label} JSON to {filename}")
-    return filename
+    logger.info(f"Saved JSON: {fname}")
+    return fname
 
+def normalize_host(u: str) -> str:
+    try:
+        host = urlparse(u).netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return ""
+
+def extract_urls_from_aio(aio_json: dict) -> set:
+    """Extract all URLs from AI Overview JSON structure"""
+    urls = set()
+    if not isinstance(aio_json, dict):
+        return urls
+
+    # Extract from references array
+    for ref in aio_json.get("references", []) or []:
+        if isinstance(ref, dict):
+            link = ref.get("link")
+            if isinstance(link, str) and link.startswith("http"):
+                urls.add(link)
+
+    # Extract from text_blocks
+    for block in aio_json.get("text_blocks", []) or []:
+        if not isinstance(block, dict):
+            continue
+        
+        # snippet_links within blocks
+        for sl in block.get("snippet_links", []) or []:
+            if isinstance(sl, dict):
+                link = sl.get("link")
+                if isinstance(link, str) and link.startswith("http"):
+                    urls.add(link)
+        
+        # list items within blocks
+        if isinstance(block.get("list"), list):
+            for item in block["list"]:
+                if isinstance(item, dict):
+                    link = item.get("link")
+                    if isinstance(link, str) and link.startswith("http"):
+                        urls.add(link)
+    
+    return urls
 
 def flatten_json(obj):
-    """Recursively collect all text and URLs from JSON."""
-    items = []
+    """Recursively extract all string values from nested JSON"""
+    out = []
     if isinstance(obj, dict):
         for v in obj.values():
-            items.extend(flatten_json(v))
+            out.extend(flatten_json(v))
     elif isinstance(obj, list):
         for i in obj:
-            items.extend(flatten_json(i))
+            out.extend(flatten_json(i))
     elif isinstance(obj, str):
-        items.append(obj)
-    return items
+        out.append(obj)
+    return out
 
-
-def find_brands_in_json(json_file, brands_file, keyword):
-    """Scan JSON for brand mentions and deduplicate results."""
-    with open(json_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
+def find_brands_in_aio(aio_json: dict, brands_file: str, keyword: str, source: str = "SerpApi") -> List[list]:
+    """Match brands in AI Overview data"""
     with open(brands_file, "r", encoding="utf-8") as f:
         brands = json.load(f)
 
     brand_map = {
-        domain: [domain.lower()] + [a.lower() for a in aliases]
+        domain.lower(): [domain.lower()] + [a.lower() for a in aliases]
         for domain, aliases in brands.items()
     }
 
-    all_text = flatten_json(data)
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _now_ts()
+    results, seen = [], set()
 
-    results = []
-    seen = set()  # 🧩 store (keyword, brand) pairs we've already logged
+    urls = extract_urls_from_aio(aio_json)
+    hosts = {u: normalize_host(u) for u in urls}
+    flat_text = " ".join(flatten_json(aio_json)).lower()
+
+    if DEBUG_MODE:
+        logger.debug(f"Found {len(urls)} URLs in AI Overview")
+        logger.debug(f"Text length: {len(flat_text)} chars")
 
     for domain, terms in brand_map.items():
-        found_match = False  # flag to track if this brand was already found
-        for term in terms:
-            if found_match:
-                break  # stop checking further aliases for this brand
-            for entry in all_text:
-                entry_lower = entry.lower()
-                if term in entry_lower:
-                    if (keyword, domain) not in seen:
-                        seen.add((keyword, domain))
-                        url = entry if entry_lower.startswith("http") else ""
-                        context = entry[:200].replace("\n", " ")
-                        results.append([
-                            timestamp,
-                            keyword,
-                            domain,
-                            term,
-                            context,
-                            url
-                        ])
-                        found_match = True
-                        break  # stop once we find the brand once
+        domain_core = domain[4:] if domain.startswith("www.") else domain
+
+        # Priority 1: URL match (most reliable)
+        matched_url = None
+        for u, h in hosts.items():
+            if h.endswith(domain_core):
+                matched_url = u
+                break
+        
+        if matched_url and (keyword, domain) not in seen:
+            seen.add((keyword, domain))
+            results.append([ts, keyword, domain, domain, matched_url[:200], matched_url, source])
+            if DEBUG_MODE:
+                logger.debug(f"Matched brand by URL: {domain} -> {matched_url}")
+            continue
+
+        # Priority 2: Text alias match
+        alias = next((t for t in terms[1:] if t in flat_text), None)
+        if alias and (keyword, domain) not in seen:
+            seen.add((keyword, domain))
+            any_url = next(iter(urls), "")
+            results.append([ts, keyword, domain, alias, alias, any_url, source])
+            if DEBUG_MODE:
+                logger.debug(f"Matched brand by alias: {domain} -> {alias}")
 
     return results
 
-def fetch_google_search(prompt):
-    """Fetch Google SERP data and extract AI Overview page_token."""
-    print(f"\n🔍 Step 1: engine=google → {prompt}")
-    r = requests.get(
-        "https://serpapi.com/search",
-        params={
-            "engine": "google",
-            "q": prompt,
-            "hl": "en",
-            "api_key": SERPAPI_KEY,
-            "no_cache": "true",
-            "google_domain": "google.com",
-            "location": "United States",
-            "safe": "active",
-            "device": "desktop",
-            "num": 10,
-            "include_ai_overview": "true",
-            "ai_mode": "strict"
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if "ai_overview" in data:
-        token = data["ai_overview"].get("page_token")
-        return token
-    else:
-        print("❌ No ai_overview object found.")
+def fetch_google_search_serpapi(keyword: str, max_retries: int = 3) -> Optional[dict]:
+    """
+    Fetch Google search with AI Overview via SerpApi
+    FIXED: Proper error handling and response validation
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"SerpApi request {attempt}/{max_retries}: {keyword}")
+            
+            response = requests.get(
+                "https://serpapi.com/search",
+                params={
+                    "engine": "google",
+                    "q": keyword,
+                    "api_key": SERPAPI_KEY,
+                    "hl": "en",
+                    "gl": "us",
+                    "device": "desktop",
+                    "num": 10,
+                },
+                timeout=30,
+            )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Check for API errors
+            if "error" in data:
+                logger.error(f"SerpApi error: {data['error']}")
+                if "Invalid API key" in str(data['error']):
+                    logger.error("❌ Invalid API key - check your SERPAPI_KEY")
+                    return None
+                if attempt < max_retries:
+                    time.sleep(5)
+                    continue
+                return None
+            
+            # Validate response structure
+            if "search_metadata" not in data:
+                logger.warning(f"Unexpected response structure")
+                if attempt < max_retries:
+                    time.sleep(3)
+                    continue
+                return None
+            
+            return data
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout on attempt {attempt}")
+            if attempt < max_retries:
+                time.sleep(5)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error: {e}")
+            if attempt < max_retries:
+                time.sleep(5)
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            break
+    
+    return None
+
+def process_keyword(keyword: str, brands_file: str) -> tuple:
+    """Process a single keyword with SerpApi"""
+    
+    # Fetch search results
+    data = fetch_google_search_serpapi(keyword)
+    
+    if not data:
+        return [], "API_ERROR"
+    
+    # Save full response if debugging
+    if SAVE_JSON:
+        save_json(data, "search_results", keyword)
+    
+    # Check if AI Overview exists
+    if "ai_overview" not in data:
+        logger.info(f"No AI Overview found for: {keyword}")
+        return [], "NO_AIO"
+    
+    aio_json = data["ai_overview"]
+    
+    # Validate AI Overview structure
+    if not isinstance(aio_json, dict):
+        logger.warning(f"Invalid AI Overview structure for: {keyword}")
+        return [], "INVALID_AIO"
+    
+    logger.info(f"✓ AI Overview found for: {keyword}")
+    
+    # Save AI Overview separately if needed
+    if SAVE_JSON:
+        save_json({"ai_overview": aio_json}, "ai_overview", keyword)
+    
+    # Find brand mentions
+    rows = find_brands_in_aio(aio_json, brands_file, keyword)
+    
+    return rows, "SUCCESS"
+
+def check_serpapi_account():
+    """Check SerpApi account info"""
+    try:
+        response = requests.get(
+            "https://serpapi.com/account",
+            params={"api_key": SERPAPI_KEY},
+            timeout=10
+        )
+        data = response.json()
+        
+        if "error" in data:
+            logger.error(f"Account check failed: {data['error']}")
+            return None
+        
+        searches_left = data.get("total_searches_left", "unknown")
+        plan = data.get("plan_name", "unknown")
+        
+        logger.info(f"📊 SerpApi Account: {plan}")
+        logger.info(f"📊 Searches remaining: {searches_left}")
+        
+        return data
+    except Exception as e:
+        logger.warning(f"Could not check account: {e}")
         return None
 
-
-def fetch_google_ai_overview(page_token, keyword):
-    """Fetch the AI Overview JSON using page_token."""
-    print(f"🔍 Step 2: engine=google_ai_overview → {keyword}")
-    r = requests.get(
-        "https://serpapi.com/search",
-        params={
-            "engine": "google_ai_overview",
-            "page_token": page_token,
-            "api_key": SERPAPI_KEY,
-            "output": "json",
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    return save_json(data, "ai_overview", keyword)
-
 def main():
-    print("🚀 Starting AI Overview Brand Tracker\n")
+    logger.info("🚀 Starting AI Overview Brand Tracker\n")
+    
+    # Check API key
+    if SERPAPI_KEY == "YOUR_API_KEY_HERE":
+        logger.error("❌ Please set your SERPAPI_KEY in the config section")
+        return
+    
+    # Check account
+    logger.info("Checking SerpApi account...")
+    account = check_serpapi_account()
+    if not account:
+        logger.warning("⚠️ Could not verify account, but continuing anyway...")
+    
+    # Validate files
+    if not os.path.exists(KEYWORDS_FILE):
+        logger.error(f"Keywords file not found: {KEYWORDS_FILE}")
+        return
+    if not os.path.exists(BRANDS_FILE):
+        logger.error(f"Brands file not found: {BRANDS_FILE}")
+        return
 
-    # Read keywords
     with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
         keywords = [line.strip() for line in f if line.strip()]
 
-    # Prepare output CSV
-    header = ["Timestamp", "Keyword", "Brand", "Matched Term", "Context", "URL"]
+    logger.info(f"Loaded {len(keywords)} keywords\n")
+
+    # Initialize output CSV
+    header = ["Timestamp", "Keyword", "Brand", "Matched Term", "Context", "URL", "Source"]
     if not os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-
-    for keyword in keywords:
+            csv.writer(f).writerow(header)
+    
+    # Process keywords
+    stats = {
+        "total": len(keywords),
+        "success": 0,
+        "no_aio": 0,
+        "api_error": 0,
+        "brands_found": 0
+    }
+    
+    for i, keyword in enumerate(keywords, 1):
+        logger.info(f"\n{'='*60}")
+        logger.info(f"[{i}/{len(keywords)}] Processing: {keyword}")
+        logger.info(f"{'='*60}")
+        
         try:
-            token = fetch_google_search(keyword)
-            if not token:
-                print(f"⚠️ Skipping '{keyword}' (no AI Overview found)\n")
-                continue
-
-            json_file = fetch_google_ai_overview(token, keyword)
-            results = find_brands_in_json(json_file, BRANDS_FILE, keyword)
-
-            if results:
+            rows, status = process_keyword(keyword, BRANDS_FILE)
+            
+            # Update stats
+            if status == "SUCCESS":
+                stats["success"] += 1
+            elif status == "NO_AIO":
+                stats["no_aio"] += 1
+            elif status == "API_ERROR":
+                stats["api_error"] += 1
+            
+            # Save results
+            if rows:
                 with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerows(results)
-                print(f"✅ Recorded {len(results)} brand mentions for '{keyword}'\n")
+                    csv.writer(f).writerows(rows)
+                stats["brands_found"] += len(rows)
+                logger.info(f"✅ Found {len(rows)} brand mention(s)")
             else:
-                print(f"⚠️ No brand mentions found for '{keyword}'\n")
+                logger.info(f"ℹ️ No brand mentions (Status: {status})")
+            
+            # Rate limiting
+            if i < len(keywords):  # Don't delay after last keyword
+                delay = random.uniform(MIN_DELAY, MAX_DELAY)
+                logger.info(f"⏳ Waiting {delay:.1f}s before next request...")
+                time.sleep(delay)
 
-            # Rate limit to avoid API throttling
-            time.sleep(5)
-
-        except requests.HTTPError as e:
-            print(f"❌ HTTP error for '{keyword}': {e}")
+        except KeyboardInterrupt:
+            logger.info("\n⚠️ Interrupted by user")
+            break
         except Exception as e:
-            print(f"❌ Unexpected error for '{keyword}': {e}")
+            logger.error(f"❌ Error processing '{keyword}': {e}")
+            stats["api_error"] += 1
+            continue
 
-    print("\n✅ All keywords processed.")
-    print(f"📊 Results saved to: {OUTPUT_FILE}")
-
+    # Final summary
+    logger.info(f"\n{'='*60}")
+    logger.info(f"✅ PROCESSING COMPLETE")
+    logger.info(f"{'='*60}")
+    logger.info(f"📊 Total keywords: {stats['total']}")
+    logger.info(f"📊 Successful: {stats['success']} ({stats['success']/stats['total']*100:.1f}%)")
+    logger.info(f"📊 No AI Overview: {stats['no_aio']} ({stats['no_aio']/stats['total']*100:.1f}%)")
+    logger.info(f"📊 API Errors: {stats['api_error']}")
+    logger.info(f"📊 Total brand mentions: {stats['brands_found']}")
+    logger.info(f"📁 Results saved to: {OUTPUT_FILE}")
+    
+    # Check account again to see usage
+    check_serpapi_account()
 
 if __name__ == "__main__":
     main()
