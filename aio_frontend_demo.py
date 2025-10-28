@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 # Import SERPAPI_KEY directly from the backend logic file
-from tracker_logic import process_keyword, check_serpapi_account, BRANDS_FILE, SERPAPI_KEY
+from ai_brand_tracker import process_keyword, check_serpapi_account, BRANDS_FILE, SERPAPI_KEY
 import time
 
 # --- Page Configuration ---
