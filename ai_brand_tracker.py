@@ -59,7 +59,8 @@ def _safe_name(s: str, limit=40):
 # --- NEW: Sentiment Analysis Function ---
 def get_llm_sentiment(overview_text: str, brand: str, retries: int = 3) -> str:
     """Analyzes the sentiment of an AI overview for a specific brand using Gemini."""
-    
+    global GEMINI_API_KEY
+
     if not GEMINI_API_KEY:
         return "not_configured"
 
@@ -107,8 +108,7 @@ def get_llm_sentiment(overview_text: str, brand: str, retries: int = 3) -> str:
             logger.error(f"Gemini API error (attempt {attempt+1}/{retries}): {e}")
             if "API key not valid" in str(e):
                 logger.error("❌ Invalid Gemini API key. Disabling sentiment analysis.")
-                global GEMINI_API_KEY # Modify global flag
-                GEMINI_API_KEY = None
+                GEMINI_API_KEY = None # <-- This line now works
                 return "api_key_invalid"
             time.sleep(2 * (attempt + 1)) # Exponential backoff
     
