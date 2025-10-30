@@ -10,6 +10,7 @@ from typing import Optional, List
 import logging
 import os
 from dotenv import load_dotenv
+import google.generativeai as genai # <-- NEW IMPORT
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 # ====== CONFIG ======
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # <-- NEW: Add this to your .env file
 KEYWORDS_FILE = "keywords.csv"
 BRANDS_FILE = "brands.json"
 OUTPUT_FILE = "ai_overview_brand_hits_master.csv"
@@ -31,6 +33,19 @@ MAX_DELAY = 5
 DEBUG_MODE = False
 # ====================
 
+# --- NEW: Configure Gemini ---
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        logger.info("Gemini API configured successfully.")
+    except Exception as e:
+        logger.error(f"Error configuring Gemini API: {e}")
+        GEMINI_API_KEY = None # Disable if config fails
+else:
+    logger.warning("GEMINI_API_KEY not found in .env. Sentiment analysis will be skipped.")
+# -----------------------------
+
+
 def _now_ts():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -39,6 +54,68 @@ def _stamp():
 
 def _safe_name(s: str, limit=40):
     return "".join(c for c in s.replace(" ", "_")[:limit] if c.isalnum() or c in ("_", "-"))
+
+
+# --- NEW: Sentiment Analysis Function ---
+def get_llm_sentiment(overview_text: str, brand: str, retries: int = 3) -> str:
+    """Analyzes the sentiment of an AI overview for a specific brand using Gemini."""
+    
+    if not GEMINI_API_KEY:
+        return "not_configured"
+
+    # Check if text is too short to be meaningful
+    if not overview_text or len(overview_text) < 20:
+        logger.warning(f"Overview text for '{brand}' is too short, skipping sentiment.")
+        return "no_text"
+        
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash') # Use a fast and modern model
+    except Exception as e:
+        logger.error(f"Could not initialize Gemini model: {e}")
+        return "model_error"
+
+    prompt = f"""
+    You are a brand sentiment analyzer. Analyze the following AI-generated Overview 
+    to determine the sentiment *specifically* towards the brand: "{brand}".
+
+    Respond with only one word: good, neutral, or bad.
+
+    Rules:
+    - good: The text speaks positively about the brand, recommends it, or it's the primary positive subject.
+    - neutral: The text is purely informational, lists the brand as an option, or the mention is not detrimental (e.g., just a citation).
+    - bad: The text is negative, mentions complaints, warns against the brand, or highlights a competitor over it.
+
+    AI Overview Text:
+    "{overview_text}"
+
+    Your one-word-answer:
+    """
+
+    for attempt in range(retries):
+        try:
+            response = model.generate_content(prompt)
+            sentiment = response.text.strip().lower()
+            
+            # Basic validation
+            if sentiment in ["good", "neutral", "bad"]:
+                return sentiment
+            else:
+                logger.warning(f"Unexpected sentiment response: '{sentiment}'. Defaulting to neutral.")
+                return "neutral"
+                
+        except Exception as e:
+            logger.error(f"Gemini API error (attempt {attempt+1}/{retries}): {e}")
+            if "API key not valid" in str(e):
+                logger.error("❌ Invalid Gemini API key. Disabling sentiment analysis.")
+                global GEMINI_API_KEY # Modify global flag
+                GEMINI_API_KEY = None
+                return "api_key_invalid"
+            time.sleep(2 * (attempt + 1)) # Exponential backoff
+    
+    logger.error(f"Sentiment analysis failed for '{brand}' after {retries} attempts.")
+    return "error"
+# ------------------------------------
+
 
 def save_json(data, label, keyword):
     if not SAVE_JSON:
@@ -119,6 +196,15 @@ def find_brands_in_aio(aio_json: dict, brands_file: str, keyword: str, source: s
     ts = _now_ts()
     results, seen = [], set()
 
+    # --- MODIFIED: Extract the main overview text for sentiment analysis ---
+    overview_text = aio_json.get("answer", "")
+    if not overview_text:
+        overview_text = aio_json.get("snippet", "") # Fallback
+        if not overview_text:
+             logger.warning("Could not find 'answer' or 'snippet' for overview text.")
+             overview_text = "" # Ensure it's a string
+    # -----------------------------------------------------------------
+
     urls = extract_urls_from_aio(aio_json)
     hosts = {u: normalize_host(u) for u in urls}
     flat_text = " ".join(flatten_json(aio_json)).lower()
@@ -139,7 +225,26 @@ def find_brands_in_aio(aio_json: dict, brands_file: str, keyword: str, source: s
         
         if matched_url and (keyword, domain) not in seen:
             seen.add((keyword, domain))
-            results.append([ts, keyword, domain, domain, matched_url[:200], matched_url, source])
+            
+            # --- NEW: Get sentiment ---
+            sentiment = get_llm_sentiment(overview_text, domain)
+            logger.info(f"Sentiment for '{domain}' (URL Match): {sentiment}")
+            # --------------------------
+
+            # --- MODIFIED: Add new columns to row ---
+            results.append([
+                ts, 
+                keyword, 
+                domain, 
+                domain, # Matched Term
+                overview_text, 
+                sentiment, 
+                matched_url[:200], # Context
+                matched_url, # URL
+                source
+            ])
+            # ----------------------------------------
+
             if DEBUG_MODE:
                 logger.debug(f"Matched brand by URL: {domain} -> {matched_url}")
             continue
@@ -148,8 +253,27 @@ def find_brands_in_aio(aio_json: dict, brands_file: str, keyword: str, source: s
         alias = next((t for t in terms[1:] if t in flat_text), None)
         if alias and (keyword, domain) not in seen:
             seen.add((keyword, domain))
-            any_url = next(iter(urls), "")
-            results.append([ts, keyword, domain, alias, alias, any_url, source])
+            any_url = next(iter(urls), "") # Get any related URL as context
+            
+            # --- NEW: Get sentiment ---
+            sentiment = get_llm_sentiment(overview_text, domain)
+            logger.info(f"Sentiment for '{domain}' (Alias Match): {sentiment}")
+            # --------------------------
+
+            # --- MODIFIED: Add new columns to row ---
+            results.append([
+                ts, 
+                keyword, 
+                domain, 
+                alias, # Matched Term
+                overview_text, 
+                sentiment,
+                alias, # Context
+                any_url, # URL
+                source
+            ])
+            # ----------------------------------------
+
             if DEBUG_MODE:
                 logger.debug(f"Matched brand by alias: {domain} -> {alias}")
 
@@ -299,11 +423,12 @@ def main():
 
     logger.info(f"Loaded {len(keywords)} keywords\n")
 
-    # Initialize output CSV
-    header = ["Timestamp", "Keyword", "Brand", "Matched Term", "Context", "URL", "Source"]
+    # --- MODIFIED: Initialize output CSV with new header ---
+    header = ["Timestamp", "Keyword", "Brand", "Matched Term", "AI_Overview_Text", "Sentiment", "Context", "URL", "Source"]
     if not os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(header)
+    # -------------------------------------------------------
     
     # Process keywords
     stats = {
@@ -358,8 +483,8 @@ def main():
     logger.info(f"✅ PROCESSING COMPLETE")
     logger.info(f"{'='*60}")
     logger.info(f"📊 Total keywords: {stats['total']}")
-    logger.info(f"📊 Successful: {stats['success']} ({stats['success']/stats['total']*100:.1f}%)")
-    logger.info(f"📊 No AI Overview: {stats['no_aio']} ({stats['no_aio']/stats['total']*100:.1f}%)")
+    logger.info(f"📊 Successful: {stats['success']}/{stats['total']} ({stats['success']/stats['total']*100:.1f}%)" if stats['total'] > 0 else "N/A")
+    logger.info(f"📊 No AI Overview: {stats['no_aio']} ({stats['no_aio']/stats['total']*100:.1f}%)" if stats['total'] > 0 else "N/A")
     logger.info(f"📊 API Errors: {stats['api_error']}")
     logger.info(f"📊 Total brand mentions: {stats['brands_found']}")
     logger.info(f"📁 Results saved to: {OUTPUT_FILE}")
