@@ -8,13 +8,16 @@ import random
 from urllib.parse import urlparse
 from typing import Optional, List
 import logging
+import os
+from dotenv import load_dotenv
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ====== CONFIG ======
-SERPAPI_KEY = "f9b272f8e9c2a77059bd272b035aa19972324fbc18440b638ba97b4466fe74ba"  # Replace with your key
+load_dotenv()
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 KEYWORDS_FILE = "keywords.csv"
 BRANDS_FILE = "brands.json"
 OUTPUT_FILE = "ai_overview_brand_hits_master.csv"
